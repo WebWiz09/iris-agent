@@ -13,6 +13,8 @@ dependencies = [
     "livekit-agents[google]~=1.5",
     "livekit-plugins-ai-coustics~=0.3",
     "livekit-plugins-google>=1.8.11",
+    "pdfplumber",
+    "pillow",
     "python-dotenv",
 ]
 
