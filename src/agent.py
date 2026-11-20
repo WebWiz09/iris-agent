@@ -8,6 +8,7 @@ from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
+    APIConnectOptions,
     JobContext,
     cli,
 )
@@ -107,6 +108,7 @@ async def my_agent(ctx: JobContext):
             api_version="v1beta",
             voice="Puck",
             temperature=0.8,
+            conn_options=APIConnectOptions(timeout=30.0),
         ),
     )
 
