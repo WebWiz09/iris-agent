@@ -5,10 +5,18 @@ import mimetypes
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-import pdfplumber
+try:
+    import pdfplumber
+except ImportError:
+    pdfplumber = None
+
 from livekit import rtc
 from livekit.agents import Agent
-from PIL import Image
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 logger = logging.getLogger("notes_handler")
 
@@ -206,6 +214,16 @@ class NotesHandler:
 
     async def _process_pdf(self, filename: str, data: bytes) -> UploadedDocument:
         """Extract text from a PDF file."""
+        if pdfplumber is None:
+            return UploadedDocument(
+                filename=filename,
+                mime_type="application/pdf",
+                size=len(data),
+                text_content="",
+                is_scanned_pdf=False,
+                extraction_error="pdfplumber is not installed. Please install pdfplumber to extract text from PDF files.",
+            )
+
         text_content = ""
         is_scanned = False
         extraction_error = None
@@ -272,6 +290,15 @@ class NotesHandler:
         self, filename: str, mime_type: str, data: bytes
     ) -> UploadedDocument:
         """Process an image file (acknowledge receipt, text extraction would need OCR)."""
+        if Image is None:
+            return UploadedDocument(
+                filename=filename,
+                mime_type=mime_type,
+                size=len(data),
+                text_content=f"[Image: {filename}]",
+                extraction_error="Pillow is not installed. Please install pillow to process image files.",
+            )
+
         extraction_error = None
         text_content = ""
         image_data = None

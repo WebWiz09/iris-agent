@@ -1,0 +1,11 @@
+{
+  "name": "iris-agent-root",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "npm --prefix frontend install && npm --prefix frontend run build"
+  },
+  "dependencies": {
+    "livekit-server-sdk": "^2.20.1"
+  }
+}

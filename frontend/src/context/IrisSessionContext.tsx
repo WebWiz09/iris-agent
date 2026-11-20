@@ -256,6 +256,22 @@ export function IrisSessionProvider({ children }: { children: ReactNode }) {
         }
       });
 
+      // Live transcriptions from LiveKit room
+      room.on(RoomEvent.TranscriptionReceived, (segments, participant) => {
+        const isAgent = !participant || !participant.isLocal;
+        const speaker = isAgent ? 'iris' : 'student';
+        const fullText = segments
+          .map((s) => s.text)
+          .join(' ')
+          .trim();
+        if (fullText) {
+          addTranscript(speaker, fullText);
+          if (isAgent) {
+            setLatestCaption(fullText);
+          }
+        }
+      });
+
       await room.connect(data.serverUrl, data.token);
       await room.localParticipant.setMicrophoneEnabled(true);
 
@@ -445,15 +461,24 @@ export function IrisSessionProvider({ children }: { children: ReactNode }) {
 
     if (livekitRoom) {
       try {
-        const participant = livekitRoom.localParticipant as unknown as {
-          sendFile?: (file: File, options?: { topic?: string }) => Promise<{ id: string }>;
-        };
+        const participant = livekitRoom.localParticipant as any;
         if (typeof participant.sendFile === 'function') {
           await participant.sendFile(file, { topic: 'notes' });
+        } else if (typeof participant.streamBytes === 'function') {
+          const buffer = await file.arrayBuffer();
+          const writer = await participant.streamBytes({ topic: 'notes' });
+          await writer.write(new Uint8Array(buffer));
+          await writer.close();
+        } else {
+          const buffer = await file.arrayBuffer();
+          await participant.publishData(new Uint8Array(buffer), {
+            reliable: true,
+            topic: 'notes',
+          });
         }
         setUploadStatus('ready');
         setCurrentSource(file.name);
-        const readyMsg = `Your notes from ${file.name} are loaded. Would you like an explanation of the core concepts, key points, or a practice quiz?`;
+        const readyMsg = `Your notes from ${file.name} are loaded into Iris. Would you like an explanation of the core concepts, key points, or a practice quiz?`;
         setUploadMessage(readyMsg);
         addTranscript('iris', readyMsg);
         speakDemo(readyMsg);

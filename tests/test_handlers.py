@@ -4,7 +4,14 @@ import io
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from PIL import Image
+
+try:
+    from PIL import Image
+
+    HAS_PIL = True
+except ImportError:
+    Image = None
+    HAS_PIL = False
 
 from camera_handler import CameraHandler
 from notes_handler import NotesHandler, UploadedDocument
@@ -67,6 +74,7 @@ class TestNotesHandler:
         assert doc.extraction_error is not None
         assert "Failed to process text file" in doc.extraction_error
 
+    @pytest.mark.skipif(not HAS_PIL, reason="PIL not installed")
     @pytest.mark.asyncio
     async def test_process_image(self, notes_handler):
         # Create a simple test image
@@ -85,6 +93,7 @@ class TestNotesHandler:
         assert doc.extraction_error is not None
         assert "OCR" in doc.extraction_error
 
+    @pytest.mark.skipif(not HAS_PIL, reason="PIL not installed")
     @pytest.mark.asyncio
     async def test_process_invalid_image(self, notes_handler):
         img_data = b"not an image"
