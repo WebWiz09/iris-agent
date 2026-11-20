@@ -1,36 +1,30 @@
+import asyncio
 import logging
 import textwrap
 
 from dotenv import load_dotenv
-from livekit.plugins import google
+from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
     JobContext,
-    STTContextOptions,
-    TurnHandlingOptions,
     cli,
-    inference,
-    room_io,
 )
+from livekit.plugins import google
 
-logger = logging.getLogger("agent")
+from camera_handler import CameraHandler
+from notes_handler import NotesHandler, notes_byte_stream_handler
 
 load_dotenv(".env.local")
 
+logger = logging.getLogger("agent")
+
 
 class Assistant(Agent):
-    def __init__(self) -> None:
+    def __init__(self, notes_handler: NotesHandler) -> None:
+        self._notes_handler = notes_handler
         super().__init__(
-            # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
-            # See all available models at https://docs.livekit.io/agents/models/llm/
-            # To use a realtime model instead of a voice pipeline, replace the LLM
-            # with a realtime model and remove the STT/TTS from the AgentSession
-            # (Note: This is for OpenAI GPT-Live, the recommended speech-to-speech
-            # model. For other providers, see https://docs.livekit.io/agents/models/realtime/)
-            # Replace the llm argument with the model's LiveKit Inference ID:
-            #    llm="openai/gpt-live-1",
             instructions=textwrap.dedent(
                 """\
                 You are Iris, a patient, warm voice study tutor for visually impaired and low-vision university students in Nigeria. The student cannot rely on a screen, so everything you do is by voice.
@@ -88,35 +82,25 @@ class Assistant(Agent):
             ),
         )
 
-    # To add tools, use the @function_tool decorator.
-    # Here's an example that adds a simple weather tool.
-    # You also have to add `from livekit.agents import function_tool, RunContext` to the top of this file
-    # @function_tool
-    # async def lookup_weather(self, context: RunContext, location: str):
-    #     """Use this tool to look up current weather information in the given location.
-    #
-    #     If the location is not supported by the weather service, the tool will indicate this. You must tell the user the location's weather is unavailable.
-    #
-    #     Args:
-    #         location: The location to look up weather information for (e.g. city name)
-    #     """
-    #
-    #     logger.info(f"Looking up weather for {location}")
-    #
-    #     return "sunny with a temperature of 70 degrees."
+    def get_document_context(self) -> str:
+        """Get the current document context for the agent."""
+        return self._notes_handler.get_document_context()
 
 
 server = AgentServer(initialize_process_timeout=60)
 
+
 @server.rtc_session()
 async def my_agent(ctx: JobContext):
     # Logging setup
-    # Add any other context you want in all log entries here
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
 
-    # Set up a voice AI pipeline using AssemblyAI, Fish Audio, and the LiveKit turn detector
+    # Create notes handler
+    notes_handler = NotesHandler(None)  # Will be set after agent creation
+
+    # Set up a voice AI pipeline using Gemini Live
     session = AgentSession(
         llm=google.realtime.RealtimeModel(
             model="gemini-3.8-live",
@@ -126,22 +110,49 @@ async def my_agent(ctx: JobContext):
         ),
     )
 
-    # Start the session, which initializes the voice pipeline and warms up the models
+    # Create assistant with notes handler
+    assistant = Assistant(notes_handler)
+    notes_handler.set_agent(assistant)
+
+    # Start the session
     await session.start(
-       agent=Assistant(),
-       room=ctx.room,
+        agent=assistant,
+        room=ctx.room,
     )
 
-    # # Add a virtual avatar to the session, if desired
-    # # For other providers, see https://docs.livekit.io/agents/models/avatar/
-    # avatar = anam.AvatarSession(
-    #     persona_config=anam.PersonaConfig(
-    #         name="...",
-    #         avatarId="...",  # See https://docs.livekit.io/agents/models/avatar/plugins/anam
-    #     ),
-    # )
-    # # Start the avatar and wait for it to join
-    # await avatar.start(session, room=ctx.room)
+    # Set up push_video_frame callback for images (uses realtime session after start)
+    def push_video_frame(frame: rtc.VideoFrame) -> None:
+        if (
+            session._activity is not None
+            and session._activity.realtime_llm_session is not None
+        ):
+            session._activity.realtime_llm_session.push_video(frame)
+        else:
+            logger.debug("No realtime session available to push video frame")
+
+    notes_handler.set_push_video_callback(push_video_frame)
+
+    # Register byte stream handler for notes uploads
+    ctx.room.register_byte_stream_handler(
+        "notes", notes_byte_stream_handler(notes_handler)
+    )
+
+    # Add participant entrypoint for camera handling
+    async def camera_entrypoint(ctx: JobContext, participant: rtc.RemoteParticipant):
+        handler = CameraHandler(ctx.room, session, frame_interval=1.0)
+        await handler.start(participant)
+
+        # Wait for participant to disconnect
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await handler.stop()
+
+    ctx.add_participant_entrypoint(
+        camera_entrypoint, kind=rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD
+    )
 
     # Join the room and connect to the user
     await ctx.connect()
