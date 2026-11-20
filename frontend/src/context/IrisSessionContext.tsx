@@ -8,6 +8,7 @@ import {
   GUIDED_LESSON_STEPS,
   type QuizQuestion,
 } from '../services/demoData';
+import { generateQuizFromDocument } from '../services/quizGenerator';
 import {
   IrisSessionContext,
   type ChatMessage,
@@ -59,7 +60,7 @@ export function IrisSessionProvider({ children }: { children: ReactNode }) {
   const [uploadMessage, setUploadMessage] = useState<string>('');
 
   // Quiz state
-  const [quizQuestions] = useState<QuizQuestion[]>(DEMO_QUIZ_QUESTIONS);
+  const [quizQuestions, setQuizQuestions] = useState<QuizQuestion[]>(DEMO_QUIZ_QUESTIONS);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState<number>(0);
   const [selectedAnswer, setSelectedAnswer] = useState<number | null>(null);
   const [isAnswerConfirmed, setIsAnswerConfirmed] = useState<boolean>(false);
@@ -106,35 +107,43 @@ export function IrisSessionProvider({ children }: { children: ReactNode }) {
   };
 
   // Helper for demo speech synthesis
-  const speakDemo = (text: string, onEnd?: () => void) => {
-    if (typeof window === 'undefined') return;
+  const speakDemo = useCallback(
+    (text: string, onEnd?: () => void) => {
+      if (typeof window === 'undefined') return;
 
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 0.95;
-      utterance.pitch = 1.0;
-      utterance.onstart = () => {
+      // Never compete with live LiveKit agent audio
+      if (connectionStatus === 'connected' && livekitRoom) {
+        return;
+      }
+
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 0.95;
+        utterance.pitch = 1.0;
+        utterance.onstart = () => {
+          setAgentState('speaking');
+          playAudioCue('speaking');
+        };
+        utterance.onend = () => {
+          setAgentState('listening');
+          playAudioCue('listening');
+          onEnd?.();
+        };
+        utterance.onerror = () => {
+          setAgentState('listening');
+        };
+        window.speechSynthesis.speak(utterance);
+      } else {
         setAgentState('speaking');
-        playAudioCue('speaking');
-      };
-      utterance.onend = () => {
-        setAgentState('listening');
-        playAudioCue('listening');
-        onEnd?.();
-      };
-      utterance.onerror = () => {
-        setAgentState('listening');
-      };
-      window.speechSynthesis.speak(utterance);
-    } else {
-      setAgentState('speaking');
-      setTimeout(() => {
-        setAgentState('listening');
-        onEnd?.();
-      }, 2400);
-    }
-  };
+        setTimeout(() => {
+          setAgentState('listening');
+          onEnd?.();
+        }, 2400);
+      }
+    },
+    [connectionStatus, livekitRoom]
+  );
 
   // Camera handling
   const stopCamera = useCallback(async () => {
@@ -192,7 +201,7 @@ export function IrisSessionProvider({ children }: { children: ReactNode }) {
     await requestWakeLock();
 
     try {
-      const res = await fetch(`/api/token?name=${encodeURIComponent(nameToUse)}`);
+      const res = await fetch(`/api/token?room=iris_study_room&name=${encodeURIComponent(nameToUse)}`);
       const data = await res.json();
 
       if (!data.configured || data.demoMode || !data.token) {
@@ -404,9 +413,12 @@ export function IrisSessionProvider({ children }: { children: ReactNode }) {
         speakDemo(text);
       }, 700);
     } else if (intent === 'quiz_me') {
-      promptText = 'Quiz me on this material, one question at a time.';
-      addTranscript('student', 'Quiz me');
-      const quizIntro = "Let's test what you've learned. Question one: Which organelle releases most of the usable ATP energy in a cell?";
+      promptText = 'Please start a 5-question multiple-choice practice quiz from my uploaded notes, one question at a time.';
+      addTranscript('student', 'Quiz me on my notes');
+      const firstQ = quizQuestions[0];
+      const quizIntro = firstQ
+        ? `Let's test what you've learned from your notes. Question one: ${firstQ.question}`
+        : "Let's test what you've learned with a practice quiz.";
       setTimeout(() => {
         addTranscript('iris', quizIntro);
         speakDemo(quizIntro);
@@ -416,7 +428,10 @@ export function IrisSessionProvider({ children }: { children: ReactNode }) {
     if (livekitRoom) {
       try {
         const encoder = new TextEncoder();
-        await livekitRoom.localParticipant.publishData(encoder.encode(promptText), { reliable: true });
+        await livekitRoom.localParticipant.publishData(encoder.encode(promptText), {
+          reliable: true,
+          topic: 'chat',
+        });
       } catch {
         // Continue gracefully
       }
@@ -458,6 +473,24 @@ export function IrisSessionProvider({ children }: { children: ReactNode }) {
     setUploadStatus('uploading');
     setUploadMessage(`Sending ${file.name} ( ${(file.size / 1024).toFixed(1)} KB)...`);
     playAudioCue('upload');
+
+    // Extract text if readable to dynamically seed quiz questions
+    try {
+      if (file.type.startsWith('text/') || file.name.endsWith('.txt') || file.name.endsWith('.md')) {
+        const text = await file.text();
+        if (text && text.trim().length > 30) {
+          const generatedQuiz = generateQuizFromDocument(text, file.name);
+          setQuizQuestions(generatedQuiz);
+          setCurrentQuestionIndex(0);
+          setSelectedAnswer(null);
+          setIsAnswerConfirmed(false);
+          setScore(0);
+          setIsQuizFinished(false);
+        }
+      }
+    } catch {
+      // Continue gracefully
+    }
 
     if (livekitRoom) {
       try {
@@ -511,6 +544,12 @@ export function IrisSessionProvider({ children }: { children: ReactNode }) {
     setUploadedFileName(DEMO_NOTES_TITLE);
     setUploadStatus('ready');
     setCurrentSource(DEMO_NOTES_TITLE);
+    setQuizQuestions(DEMO_QUIZ_QUESTIONS);
+    setCurrentQuestionIndex(0);
+    setSelectedAnswer(null);
+    setIsAnswerConfirmed(false);
+    setScore(0);
+    setIsQuizFinished(false);
     playAudioCue('upload');
     const msg = `Loaded ${DEMO_NOTES_TITLE}. These university biology notes cover cell structures, organelle functions, and membrane transport. How shall we begin?`;
     setUploadMessage(msg);
@@ -558,7 +597,7 @@ export function IrisSessionProvider({ children }: { children: ReactNode }) {
       : `Not quite. Option ${String.fromCharCode(65 + question.correct)}, ${question.options[question.correct]}, is correct. ${question.explanation}`;
 
     speakDemo(feedbackText);
-  }, [selectedAnswer, isAnswerConfirmed, quizQuestions, currentQuestionIndex]);
+  }, [selectedAnswer, isAnswerConfirmed, quizQuestions, currentQuestionIndex, speakDemo]);
 
   const nextQuizQuestion = () => {
     if (currentQuestionIndex + 1 < quizQuestions.length) {
@@ -648,6 +687,7 @@ export function IrisSessionProvider({ children }: { children: ReactNode }) {
         uploadNotesFile,
         useDemoNotes,
         quizQuestions,
+        setQuizQuestions,
         currentQuestionIndex,
         selectedAnswer,
         isAnswerConfirmed,

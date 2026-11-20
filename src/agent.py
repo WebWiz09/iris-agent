@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import textwrap
 
 from dotenv import load_dotenv
@@ -70,9 +71,11 @@ class Assistant(Agent):
 
                 # Quiz mode
 
-                - When asked to quiz, ask one question at a time about the material in front of you, wait for the answer, say whether it was right, give a short explanation, then ask the next.
-                - For exam practice, ask multiple choice questions and read the options as A, B, C and D. Say these are practice questions from the student's own material, not official exam questions.
-                - After about five questions, give a short spoken score and one tip on what to review.
+                - When asked to quiz (or when notes are loaded and the student wants exam practice), conduct a 5-question multiple-choice quiz grounded directly in the student's material.
+                - Deliver one question at a time. Read the question clearly, and read the options as A, B, C, and D.
+                - Wait for the student's answer.
+                - Give immediate spoken feedback: confirm if correct, or give a 1-sentence explanation if incorrect, then ask the next question.
+                - After five questions, give their score out of five and one specific recommendation for revision.
 
                 # Boundaries
 
@@ -101,13 +104,17 @@ async def my_agent(ctx: JobContext):
     # Create notes handler
     notes_handler = NotesHandler(None)  # Will be set after agent creation
 
-    # Set up a voice AI pipeline using Gemini Live
+    # Set up a voice AI pipeline using Gemini Live (ultra-low latency native audio)
+    live_model = os.getenv(
+        "GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025"
+    )
+    logger.info(f"Connecting to Gemini Live with model: {live_model}")
+
     session = AgentSession(
         llm=google.realtime.RealtimeModel(
-            model="gemini-3.8-live",
-            api_version="v1beta",
+            model=live_model,
             voice="Puck",
-            temperature=0.8,
+            temperature=0.7,
             conn_options=APIConnectOptions(timeout=30.0),
         ),
     )
@@ -138,6 +145,25 @@ async def my_agent(ctx: JobContext):
     ctx.room.register_byte_stream_handler(
         "notes", notes_byte_stream_handler(notes_handler)
     )
+
+    # Listen for user commands and chat text sent via data channel
+    pending_chat_tasks: set[asyncio.Task] = set()
+
+    @ctx.room.on("data_received")
+    def on_data_received(data_packet: rtc.DataPacket):
+        try:
+            text = data_packet.data.decode("utf-8").strip()
+            if text:
+                logger.info(f"Received student prompt via data channel: {text}")
+                task = asyncio.create_task(
+                    session.generate_reply(
+                        instructions=f"The student sent this instruction or question: {text}. Respond warmly and follow their instruction directly."
+                    )
+                )
+                pending_chat_tasks.add(task)
+                task.add_done_callback(pending_chat_tasks.discard)
+        except Exception as e:
+            logger.debug(f"Error handling data packet: {e}")
 
     # Add participant entrypoint for camera handling
     async def camera_entrypoint(ctx: JobContext, participant: rtc.RemoteParticipant):

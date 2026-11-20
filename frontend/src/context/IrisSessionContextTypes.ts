@@ -65,6 +65,7 @@ export interface IrisSessionContextValue {
 
   // Quiz State
   quizQuestions: QuizQuestion[];
+  setQuizQuestions: (questions: QuizQuestion[]) => void;
   currentQuestionIndex: number;
   selectedAnswer: number | null;
   isAnswerConfirmed: boolean;

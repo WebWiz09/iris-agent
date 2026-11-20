@@ -46,6 +46,7 @@ export function UploadPage() {
       await sendTeachingIntent('quick_recap');
       navigate('/study');
     } else if (action === 'quiz_me') {
+      await sendTeachingIntent('quiz_me');
       navigate('/quiz');
     }
   };

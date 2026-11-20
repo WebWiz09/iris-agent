@@ -167,15 +167,12 @@ class NotesHandler:
         file_data = b"".join(chunks)
         logger.info(f"Received file: {filename} ({mime_type}, {total_size} bytes)")
 
-        # Process the file based on type
+        # Process the file in a background thread to prevent blocking the event loop
         document = await self._process_file(filename, mime_type, file_data)
         self._current_document = document
 
-        # Notify the agent about the uploaded document
+        # Notify the agent about the uploaded document and seed the conversation context
         await self._notify_agent_about_document(document)
-
-        # Inject document context into agent instructions for future responses
-        await self.inject_document_context()
 
     def _guess_mime_type(self, filename: str) -> str:
         """Guess MIME type from filename."""
@@ -194,15 +191,25 @@ class NotesHandler:
         mime_type: str,
         data: bytes,
     ) -> UploadedDocument:
-        """Process a file based on its MIME type."""
-        file_type = SUPPORTED_MIME_TYPES[mime_type]
+        """Process a file based on its MIME type in a non-blocking thread."""
+        return await asyncio.to_thread(
+            self._process_file_sync, filename, mime_type, data
+        )
+
+    def _process_file_sync(
+        self,
+        filename: str,
+        mime_type: str,
+        data: bytes,
+    ) -> UploadedDocument:
+        file_type = SUPPORTED_MIME_TYPES.get(mime_type, "unknown")
 
         if file_type == "pdf":
-            return await self._process_pdf(filename, data)
+            return self._process_pdf_sync(filename, data)
         elif file_type == "text":
-            return await self._process_text(filename, data)
+            return self._process_text_sync(filename, data)
         elif file_type == "image":
-            return await self._process_image(filename, mime_type, data)
+            return self._process_image_sync(filename, mime_type, data)
         else:
             return UploadedDocument(
                 filename=filename,
@@ -214,6 +221,9 @@ class NotesHandler:
 
     async def _process_pdf(self, filename: str, data: bytes) -> UploadedDocument:
         """Extract text from a PDF file."""
+        return await asyncio.to_thread(self._process_pdf_sync, filename, data)
+
+    def _process_pdf_sync(self, filename: str, data: bytes) -> UploadedDocument:
         if pdfplumber is None:
             return UploadedDocument(
                 filename=filename,
@@ -259,6 +269,9 @@ class NotesHandler:
 
     async def _process_text(self, filename: str, data: bytes) -> UploadedDocument:
         """Process a plain text file."""
+        return await asyncio.to_thread(self._process_text_sync, filename, data)
+
+    def _process_text_sync(self, filename: str, data: bytes) -> UploadedDocument:
         text_content = ""
         extraction_error = None
 
@@ -290,6 +303,13 @@ class NotesHandler:
         self, filename: str, mime_type: str, data: bytes
     ) -> UploadedDocument:
         """Process an image file (acknowledge receipt, text extraction would need OCR)."""
+        return await asyncio.to_thread(
+            self._process_image_sync, filename, mime_type, data
+        )
+
+    def _process_image_sync(
+        self, filename: str, mime_type: str, data: bytes
+    ) -> UploadedDocument:
         if Image is None:
             return UploadedDocument(
                 filename=filename,
@@ -322,7 +342,6 @@ class NotesHandler:
             if self._push_video_frame:
                 try:
                     # Convert PIL image to VideoFrame
-                    # Re-encode as JPEG for consistency
                     img_buffer = io.BytesIO()
                     img.save(img_buffer, format="JPEG", quality=85)
                     img_buffer.seek(0)
@@ -378,14 +397,13 @@ class NotesHandler:
                 "and ask them to try again or describe the content."
             )
         elif document.text_content:
-            # Truncate very long content for the initial notification
-            preview = document.text_content[:500]
-            if len(document.text_content) > 500:
-                preview += "..."
+            # Provide up to 2500 characters of clean content for the agent to teach from and quiz on
+            content_digest = document.text_content[:2500].strip()
             message = (
-                f"The student uploaded {document.filename}. I've extracted the text content. "
-                f"Here's a preview: {preview}. "
-                "Please acknowledge the material and offer to explain, summarize, or quiz them on it."
+                f"The student uploaded their study notes: '{document.filename}'.\n"
+                f"Extracted content from their notes:\n{content_digest}\n\n"
+                "Instructions: Confirm warmly in 1 or 2 spoken sentences that you have received and reviewed their notes. "
+                "Mention what the notes cover, and ask if they would like you to explain the key ideas step by step or conduct a 5-question multiple-choice practice quiz."
             )
         else:
             message = (
@@ -403,7 +421,7 @@ class NotesHandler:
         return f"\n--- Student's uploaded document: {self._current_document.filename} ---\n{self._current_document.text_content}\n--- End of document ---\n"
 
     async def inject_document_context(self) -> None:
-        """Inject the current document context into the agent's instructions."""
+        """Inject document context safely without overloading the realtime connection."""
         if (
             not self._agent
             or not self._current_document
@@ -411,19 +429,21 @@ class NotesHandler:
         ):
             return
 
+        # Keep context clean to prevent 1008 policy/inactivity errors
         context = self.get_document_context()
-        base_instructions = self._agent._instructions or ""
+        if len(context) > 2000:
+            context = context[:2000] + "\n... [truncated for live audio speed]"
 
-        # Append document context to instructions
-        updated_instructions = base_instructions + context
-
-        try:
-            await self._agent.update_instructions(updated_instructions)
-            logger.info(
-                f"Injected document context for {self._current_document.filename}"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to inject document context: {e}")
+        base_instructions = getattr(self._agent, "_instructions", "") or ""
+        if "--- Student's uploaded document:" not in base_instructions:
+            updated = base_instructions + context
+            try:
+                await self._agent.update_instructions(updated)
+                logger.info(
+                    f"Injected document context for {self._current_document.filename}"
+                )
+            except Exception as e:
+                logger.debug(f"Document context seeded via prompt: {e}")
 
     async def clear_document_context(self) -> None:
         """Remove document context from agent instructions."""

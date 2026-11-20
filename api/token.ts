@@ -39,7 +39,7 @@ export default async function handler(req: any, res: any) {
     const roomName =
       query.room ||
       body.room ||
-      `iris_room_${Date.now()}`;
+      'iris_study_room';
 
     // Unique participant identity
     const identity = `student_${Math.random().toString(36).slice(2, 9)}`;
